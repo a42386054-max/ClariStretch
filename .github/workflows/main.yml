@@ -33,7 +33,7 @@ jobs:
     # Replace "main.py" with the entry point file of your script
     - name: Build EXE with PyInstaller
       run: |
-        pyinstaller --onefile main.py
+        pyinstaller --onefile claristretch.py
 
     # Step 5: Upload the compiled .exe file so you can download it from GitHub
     - name: Upload Build Artifact

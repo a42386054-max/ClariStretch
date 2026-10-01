@@ -1,43 +1,48 @@
-name: Build Windows Executable
+name: Build and Release Windows Executable on Push
 
 on:
   push:
     branches:
-      - main # Triggers the build every time you push to the main branch
-  workflow_dispatch: # Allows you to manually trigger the build from the Actions tab
+      - main # Triggers automatically every time new code is pushed to main
+  workflow_dispatch: # Allows manual trigger if needed
+
+permissions:
+  contents: write # Crucial: Allows GitHub Actions to create the release and upload the .exe
 
 jobs:
   build:
     runs-on: windows-latest
 
     steps:
-    # Step 1: Download your repository code onto the runner
     - name: Checkout repository
       uses: actions/checkout@v4
 
-    # Step 2: Set up the Python environment
     - name: Set up Python
       uses: actions/setup-python@v5
       with:
-        python-python-version: '3.11' # Change to your preferred Python version
-        cache: 'pip' # Automatically caches dependencies for faster subsequent runs
+        python-version: '3.11'
+        cache: 'pip'
 
-    # Step 3: Install required tools and your project dependencies
     - name: Install dependencies
       run: |
         python -m pip install --upgrade pip
         pip install pyinstaller
         if (Test-Path requirements.txt) { pip install -r requirements.txt }
 
-    # Step 4: Compile the script into a single .exe file
-    # Replace "main.py" with the entry point file of your script
     - name: Build EXE with PyInstaller
       run: |
         pyinstaller --onefile claristretch.py
 
-    # Step 5: Upload the compiled .exe file so you can download it from GitHub
-    - name: Upload Build Artifact
-      uses: actions/upload-artifact@v4
+    # This step triggers on every push, creating a unique release version
+    - name: Create GitHub Release
+      id: create_release
+      uses: softprops/action-gh-release@v2
       with:
-        name: windows-executable
-        path: dist/*.exe
+        tag_name: build-${{ github.run_number }}
+        name: Build Version ${{ github.run_number }}
+        body: |
+          Automated compilation from latest push.
+          Commit: ${{ github.sha }}
+        draft: false
+        prerelease: false
+        files: dist/*.exe

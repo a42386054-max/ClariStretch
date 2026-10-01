@@ -37,3 +37,12 @@ jobs:
         name: claristretch-windows-executable
         path: dist/claristretch.exe
         retention-days: 30
+        # 2. ADD THE RELEASE STEP AT THE VERY END
+    - name: Create Release and Upload Executable
+      uses: softprops/action-gh-release@v2
+      with:
+        tag_name: v1.0.${{ github.run_number }}
+        name: Release v1.0.${{ github.run_number }}
+        files: claristretch-windows-executable.zip
+      env:
+        GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}

@@ -1,0 +1,30 @@
+# --- Python ---
+__pycache__/
+*.py[cod]
+*$py.class
+*.egg-info/
+.eggs/
+
+# --- Virtual environments ---
+venv/
+.venv/
+env/
+ENV/
+
+# --- PyInstaller build output ---
+build/
+dist/
+*.spec
+
+# --- Editors / OS cruft ---
+.vscode/
+.idea/
+.DS_Store
+Thumbs.db
+
+# --- Astro working files you probably don't want versioned ---
+# (uncomment any that apply to how you work)
+# *.fits
+# *.fit
+# *.tif
+# *.tiff

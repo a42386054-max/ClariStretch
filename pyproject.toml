@@ -1,0 +1,79 @@
+[build-system]
+requires = ["setuptools>=68", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "claristretch"
+version = "1.0.0"
+description = "A PyQt6 astrophotography image processor: FITS/OSC ingestion, wavelet denoising with star protection, arcsinh stretch, and RGB channel alignment."
+readme = "README.md"
+license = { file = "LICENSE" }
+authors = [
+    { name = "ClariStretch contributors" },
+]
+requires-python = ">=3.10"
+keywords = [
+    "astrophotography",
+    "fits",
+    "image-processing",
+    "pyqt6",
+    "opencv",
+    "scikit-image",
+    "denoising",
+    "astronomy",
+]
+classifiers = [
+    "Development Status :: 4 - Beta",
+    "Environment :: X11 Applications :: Qt",
+    "Intended Audience :: Science/Research",
+    "License :: OSI Approved :: GNU General Public License v3 (GPLv3)",
+    "Operating System :: OS Independent",
+    "Programming Language :: Python :: 3",
+    "Programming Language :: Python :: 3.10",
+    "Programming Language :: Python :: 3.11",
+    "Programming Language :: Python :: 3.12",
+    "Topic :: Scientific/Engineering :: Astronomy",
+    "Topic :: Multimedia :: Graphics :: Graphics Conversion",
+    "Topic :: Scientific/Engineering :: Image Processing",
+]
+
+dependencies = [
+    "PyQt6",
+    "numpy",
+    "opencv-python-headless",
+    "matplotlib",
+    "astropy",
+    "scikit-image",
+    "PyWavelets",
+]
+
+[project.optional-dependencies]
+# threadpoolctl lets the "Max CPU Cores" slider also cap numpy/scikit-image's
+# native BLAS/OpenMP thread pools, not just OpenCV's own operations. The app runs
+# fine without it - see the in-app comment where it's imported - so it's optional
+# rather than a hard dependency.
+cpu-throttling = ["threadpoolctl"]
+# Tools used only during development, never required to run the app itself.
+dev = ["pyinstaller", "Pillow"]
+
+[project.urls]
+Homepage = "https://github.com/<your-username>/ClariStretch"
+Issues = "https://github.com/<your-username>/ClariStretch/issues"
+
+[project.scripts]
+# Lets `pip install .` (or `pip install claristretch` once published) drop a
+# `claristretch` command on PATH that launches the app, in addition to running it
+# directly with `python claristretch.py`. Both paths call the same main().
+claristretch = "claristretch:main"
+
+[tool.setuptools]
+py-modules = ["claristretch"]
+# NOTE: claristretch.py is a single flat module, not a package, so setuptools'
+# package-data mechanism (which only copies data into installed *packages*) can't
+# bundle assets/ for a `pip install` of this project. That's fine in practice - the
+# project's actual distribution path is the PyInstaller build documented in
+# README.md, which bundles assets/icon.png explicitly via its own --add-data flag.
+# A `pip install .` install will still run (`claristretch` entry point works), but
+# resource_path() won't find assets/icon.png unless you run it from the project
+# root, so the window icon falls back to Qt's blank default - see
+# ClariStretch's _load_app_icon(), which handles that gracefully.

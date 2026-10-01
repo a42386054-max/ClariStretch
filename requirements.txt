@@ -1,0 +1,9 @@
+PyQt6
+numpy
+opencv-python-headless
+matplotlib
+astropy
+scikit-image
+PyWavelets
+threadpoolctl
+

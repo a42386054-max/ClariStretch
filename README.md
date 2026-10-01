@@ -1,7 +1,14 @@
 # ClariStretch
-<<<<<<< HEAD
 
-ClariStretch is a desktop astrophotography image processor built with PyQt6. It
+ClariStretch is a free, open-source desktop astrophotography image processor,
+licensed under the [GNU GPL v3](LICENSE) - the full source is in this repo, anyone
+can read it, modify it, and redistribute their own changes under the same license.
+It's a small project built and maintained without a company or a budget behind it,
+which is also why the Windows build below isn't code-signed (see
+[Code signing and Windows SmartScreen](#code-signing-and-windows-smartscreen)
+for what that means for you and how to get past the warning it causes).
+
+ClariStretch
 handles the full linear-to-stretched workflow for stacked subs: loading (including
 FITS, multi-extension per-filter stacks, and one-shot-color/Bayer sensor data),
 background (light-pollution gradient) extraction, wavelet-based denoising with a
@@ -24,6 +31,12 @@ background `QThread`.
   the image's own background statistics.
 - **Auto-Align**: cross-correlation-based RGB channel alignment (`cv2.phaseCorrelate`)
   to fix chromatic fringing in one click.
+- **LRGB combination**: load separate Luminance/Red/Green/Blue master frames and
+  combine them into one color image. R/G/B supply color (chrominance) while L -
+  typically the sharpest, highest-SNR frame of the set - substitutes for the
+  luminance channel via an LAB color-space blend, with an adjustable blend strength
+  slider. Masters of different resolutions are automatically resized to match
+  (defaulting to L's resolution when L is loaded).
 - **Real-time local preview**: click anywhere on the main viewport to instantly
   preview denoise/mask settings on a small crop, without reprocessing the whole image.
 - **8-bit/16-bit export**, with automatic fallback when a chosen format (e.g. JPEG)
@@ -172,10 +185,49 @@ fully suppress it, set `PYTHONWARNINGS=ignore` in the environment you run
 `pyinstaller` from - that silences it at the build-process level regardless of
 which hook triggers it.
 
+## Code signing and Windows SmartScreen
+
+ClariStretch is an open-source project with no company behind it, and the
+`.exe` built from the instructions above is **not code-signed**. Code signing
+requires buying a certificate from a certificate authority (typically on the
+order of $100-500/year) and re-signing every release, which isn't something
+this project currently does. An unsigned `.exe` is completely normal for a
+small open-source tool - it does not mean the file is unsafe - but it does
+mean Windows has no cryptographic way to vouch for who built it, so it treats
+it with suspicion by default.
+
+Because of that, the first time you (or anyone) runs `ClariStretch.exe` on
+Windows, **Windows Defender SmartScreen** will very likely block it with a
+blue "Windows protected your PC" screen. This is Microsoft's standard
+reputation check for any executable that isn't signed by a well-known
+publisher or that few people have run yet - it isn't specific to
+ClariStretch, and it isn't a virus/malware detection (that's a separate
+thing - Windows Defender antivirus - and if that flags the file instead,
+treat it as a real signal and don't bypass it).
+
+To run the app anyway, once you've built it yourself (or downloaded it from
+this project's own GitHub Releases page) and you're confident of where it
+came from:
+
+1. When the blue SmartScreen screen appears, click **"More info"** (a small
+   link, easy to miss, in the body of the dialog).
+2. A **"Run anyway"** button will appear - click it.
+3. The app launches normally, and Windows remembers this choice for this
+   specific file going forward.
+
+If you don't see a SmartScreen prompt at all but the file still won't open,
+right-click the `.exe` → **Properties** → check for an **"Unblock"** checkbox
+near the bottom of the **General** tab (Windows adds this to files downloaded
+from the internet) → check it → **Apply**.
+
+Only do this for a copy of `ClariStretch.exe` you built yourself from this
+repo's source, or downloaded directly from this project's own GitHub page -
+never for a copy someone sent you another way, since SmartScreen's warning
+is also the normal first line of defense against genuinely malicious
+software, and "it's just unsigned, bypass the warning" is exactly what a
+trojan would also want you to believe.
+
 ## Project status
 
 This is an actively developed internal tool; interfaces and defaults (denoise
 sigma scaling, star-mask thresholds, preview crop size, etc.) may still change.
-=======
-A PyQt6 astrophotography image processor — FITS/OSC ingestion, wavelet denoising with star protection, arcsinh stretch, and RGB alignment.
->>>>>>> 4e3e95392ae908c7193bc6830411efde803b63c1

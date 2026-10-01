@@ -44,6 +44,23 @@ background `QThread`.
 - **CPU throttling**: a Max CPU Cores slider caps both OpenCV's and (when
   `threadpoolctl` is installed) NumPy/scikit-image's native thread pools during
   the denoise pass.
+- **Star-aware background extraction**: the light-pollution gradient model excludes
+  star pixels (reusing the denoiser's own star-mask logic) before fitting, instead
+  of letting bright stars bias the local gradient estimate - this avoids the faint
+  dark halos that otherwise appear around stars in star-dense fields once the
+  background model is subtracted back out.
+- **Before/after comparison**: a "View" selector above the live preview flips
+  between the original loaded image, the current processed result, or a side-by-side
+  split view with a divider line - so you can always check what your edits actually
+  changed, not just the current state.
+- **Drag-and-drop loading + recent files**: drop a FITS/TIFF/PNG/JPEG file anywhere
+  on the window to load it, or reopen one of your last 10 files from the Recent
+  Files menu next to the load button (persisted across app restarts).
+- **Session/recipe persistence**: save every slider (denoise strengths, stretch
+  factor, alignment offsets, star-mask settings, and more) to a small `.json` file
+  via "Save Settings...", and reload it later with "Load Settings..." - useful for
+  reprocessing the same target in a future session, or applying a known-good
+  setting to a new one, without re-tuning from scratch.
 
 ## Requirements
 

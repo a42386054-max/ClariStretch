@@ -1,64 +1,43 @@
-name: Auto Compile Claristretch to EXE
+name: Build Windows Executable
 
 on:
   push:
     branches:
-      - main  # Change to 'master' if your default branch uses that name
+      - main # Triggers the build every time you push to the main branch
+  workflow_dispatch: # Allows you to manually trigger the build from the Actions tab
 
 jobs:
-  build-exe:
+  build:
     runs-on: windows-latest
 
     steps:
-    - name: Checkout repository code
+    # Step 1: Download your repository code onto the runner
+    - name: Checkout repository
       uses: actions/checkout@v4
 
+    # Step 2: Set up the Python environment
     - name: Set up Python
       uses: actions/setup-python@v5
       with:
-        python-version: '3.11'
+        python-python-version: '3.11' # Change to your preferred Python version
+        cache: 'pip' # Automatically caches dependencies for faster subsequent runs
 
-    # Installs PyInstaller and all required libraries
+    # Step 3: Install required tools and your project dependencies
     - name: Install dependencies
       run: |
         python -m pip install --upgrade pip
         pip install pyinstaller
-        pip install -r requirements.txt
+        if (Test-Path requirements.txt) { pip install -r requirements.txt }
 
-    # Compiles code, hides console, bundles assets folder, and attaches icon.ico
-    - name: Compile Script to EXE
+    # Step 4: Compile the script into a single .exe file
+    # Replace "main.py" with the entry point file of your script
+    - name: Build EXE with PyInstaller
       run: |
-        pyinstaller --onefile --noconsole --add-data "assets;assets" --icon="assets/icon.ico" claristretch.py
+        pyinstaller --onefile main.py
 
-    # Uploads the finished 'claristretch.exe' file to your GitHub dashboard
-    - name: Upload Compiled EXE Artifact
+    # Step 5: Upload the compiled .exe file so you can download it from GitHub
+    - name: Upload Build Artifact
       uses: actions/upload-artifact@v4
       with:
-        name: claristretch-windows-executable
-        path: dist/claristretch.exe
-        retention-days: 30
-name: Create Release
-
-on:
-  push:
-    tags:
-      - 'v*'
-
-jobs:
-  release:
-    runs-on: ubuntu-latest
-    
-    # ⬇️ ADD THESE LINES HERE ⬇️
-    permissions:
-      contents: write
-    
-    steps:
-      - name: Checkout code
-        uses: actions/checkout@v4
-
-      # ... your build steps ...
-
-      - name: Run softprops/action-gh-release
-        uses: softprops/action-gh-release@v2
-        with:
-          files: claristretch-windows-executable.zip
+        name: windows-executable
+        path: dist/*.exe

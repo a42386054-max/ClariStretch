@@ -10,6 +10,7 @@ QThread workers so the UI never blocks on full-resolution processing.
 import sys
 import os
 import gc
+import json
 import multiprocessing
 import warnings
 
@@ -79,12 +80,12 @@ except ImportError as e:
 # console/stderr failure (sys.exit below) rather than a dialog - there's nothing left to
 # show a dialog with.
 try:
-    from PyQt6.QtCore import Qt, QThread, pyqtSignal
+    from PyQt6.QtCore import Qt, QThread, pyqtSignal, QSettings
     from PyQt6.QtGui import QImage, QPixmap, QIcon
     from PyQt6.QtWidgets import (
         QApplication, QMainWindow, QWidget, QVBoxLayout, QHBoxLayout, QGroupBox,
         QPushButton, QLabel, QCheckBox, QComboBox, QSlider, QFileDialog, QScrollArea,
-        QSizePolicy, QProgressBar, QMessageBox,
+        QSizePolicy, QProgressBar, QMessageBox, QMenu,
     )
 except ImportError as e:
     sys.exit(
@@ -130,16 +131,17 @@ class BackgroundExtractionWorker(QThread):
     finished_ok = pyqtSignal(object, bool, str)  # gradient_removed array, did_extract, filename
     failed = pyqtSignal(str)
 
-    def __init__(self, compute_fn, raw_image, do_extract, filename):
+    def __init__(self, compute_fn, raw_image, do_extract, filename, star_mask_params=None):
         super().__init__()
         self._compute_fn = compute_fn
         self._raw_image = raw_image
         self._do_extract = do_extract
         self._filename = filename
+        self._star_mask_params = star_mask_params
 
     def run(self):
         try:
-            result = self._compute_fn(self._raw_image, self._do_extract)
+            result = self._compute_fn(self._raw_image, self._do_extract, self._star_mask_params)
             self.finished_ok.emit(result, self._do_extract, self._filename)
         except Exception as e:
             self.failed.emit(str(e))
@@ -289,11 +291,21 @@ class ClariStretch(QMainWindow):
     # Side length of the real-time click-to-preview crop used for instant slider feedback.
     PREVIEW_CROP_SIZE = 300
 
+    # File-picker filter and drag-and-drop both need to agree on exactly which
+    # extensions ClariStretch can open - kept in one place so they can't drift apart.
+    SUPPORTED_LOAD_EXTS = (".tif", ".tiff", ".fits", ".fit", ".png", ".jpg", ".jpeg")
+    LOAD_FILE_FILTER = "All Astro Formats (*.tif *.tiff *.fits *.fit *.png *.jpg)"
+
+    # Recent-files list cap - small enough to stay a quick-glance list, generous
+    # enough to cover a typical multi-target imaging session.
+    MAX_RECENT_FILES = 10
+
     def __init__(self):
         super().__init__()
         self.setWindowTitle("ClariStretch")
         self.resize(1250, 850)
         self.setWindowIcon(_load_app_icon())
+        self.setAcceptDrops(True)  # drag-and-drop a FITS/image file straight onto the window
 
         # Image arrays
         self.raw_image = None         # Untouched loaded file
@@ -302,6 +314,20 @@ class ClariStretch(QMainWindow):
         self.preview_source = None    # Downsampled copy of gradient_removed used for interactive editing
         self.preview_scale = 1.0      # preview_source size / full-resolution size
         self.file_path = None
+
+        # Before/after comparison: a frozen copy of preview_source taken the moment a
+        # load finishes - before any denoise/stretch/alignment is applied - so the
+        # comparison view has a stable "before" to show no matter how much the user
+        # goes on to denoise, undo, or re-stretch afterward.
+        self._original_preview_source = None
+
+        # Recent files: persisted via QSettings (survives app restarts, unlike an
+        # in-memory list), so a repeat session on the same target is one click away.
+        self._settings = QSettings("ClariStretch", "ClariStretch")
+        stored_recent = self._settings.value("recent_files", [])
+        if isinstance(stored_recent, str):  # QSettings collapses a 1-item list to a bare str
+            stored_recent = [stored_recent] if stored_recent else []
+        self._recent_files = [p for p in (stored_recent or []) if isinstance(p, str)]
 
         # LRGB combination workflow: separately-loaded L/R/G/B masters, each stored as a
         # float [0,1] mono array (already percentile-normalized, see load_lrgb_channel),
@@ -347,6 +373,17 @@ class ClariStretch(QMainWindow):
         self.load_btn = QPushButton("Load Stacked Image")
         self.load_btn.clicked.connect(self.load_image)
         control_layout.addWidget(self.load_btn)
+
+        self.recent_files_btn = QPushButton("Recent Files ▾")
+        self.recent_files_menu = QMenu(self)
+        self.recent_files_btn.setMenu(self.recent_files_menu)
+        control_layout.addWidget(self.recent_files_btn)
+        self._refresh_recent_files_menu()
+
+        drop_hint = QLabel("Tip: drag and drop a FITS/image file anywhere on this window to load it.")
+        drop_hint.setWordWrap(True)
+        drop_hint.setStyleSheet("color: #666666;")
+        control_layout.addWidget(drop_hint)
 
         self.info_label = QLabel("No image loaded")
         self.info_label.setWordWrap(True)
@@ -569,6 +606,28 @@ class ClariStretch(QMainWindow):
 
         control_layout.addWidget(rgb_group)
 
+        # --- Section 3b: Session / Recipe Persistence ---
+        recipe_group = QGroupBox("Session / Recipe")
+        recipe_layout = QVBoxLayout(recipe_group)
+        recipe_help = QLabel(
+            "Save every slider above (denoise, stretch, alignment) to a small JSON "
+            "file, then reload it later to reprocess the same target, or apply a "
+            "known-good setting to a new session, without re-tuning from scratch."
+        )
+        recipe_help.setWordWrap(True)
+        recipe_help.setStyleSheet("color: #666666;")
+        recipe_layout.addWidget(recipe_help)
+
+        save_settings_btn = QPushButton("Save Settings...")
+        save_settings_btn.clicked.connect(self.save_settings_clicked)
+        recipe_layout.addWidget(save_settings_btn)
+
+        load_settings_btn = QPushButton("Load Settings...")
+        load_settings_btn.clicked.connect(self.load_settings_clicked)
+        recipe_layout.addWidget(load_settings_btn)
+
+        control_layout.addWidget(recipe_group)
+
         # --- Export Layout ---
         self.export_16bit_chk = QCheckBox("Export as 16-bit (PNG/TIFF only)")
         control_layout.addWidget(self.export_16bit_chk)
@@ -607,9 +666,17 @@ class ClariStretch(QMainWindow):
         viz_widget = QWidget()
         viz_layout = QVBoxLayout(viz_widget)
 
+        preview_header = QHBoxLayout()
         preview_title = QLabel("Live Preview")
         preview_title.setStyleSheet("font-weight: bold; font-size: 12pt;")
-        viz_layout.addWidget(preview_title)
+        preview_header.addWidget(preview_title)
+        preview_header.addStretch(1)
+        preview_header.addWidget(QLabel("View:"))
+        self.compare_mode_combo = QComboBox()
+        self.compare_mode_combo.addItems(["After (Processed)", "Before (Original)", "Split View"])
+        self.compare_mode_combo.currentTextChanged.connect(lambda _=None: self.update_preview_display())
+        preview_header.addWidget(self.compare_mode_combo)
+        viz_layout.addLayout(preview_header)
 
         # Embedded live preview panel - the direct replacement for the original
         # cv2.imshow/waitKey popup, which ran its own native window outside of the
@@ -671,17 +738,90 @@ class ClariStretch(QMainWindow):
             return
 
         file_path, _ = QFileDialog.getOpenFileName(
-            self, "Load Stacked Image", "",
-            "All Astro Formats (*.tif *.tiff *.fits *.fit *.png *.jpg)",
+            self, "Load Stacked Image", "", self.LOAD_FILE_FILTER,
         )
         if not file_path:
             return
-        self.file_path = file_path
+        self._load_file_path(file_path)
 
+    def _load_file_path(self, file_path):
+        """Shared tail-end of every way a file can be loaded (the file dialog, a drag-
+        and-drop drop, or picking a Recent Files entry): set self.file_path, load the
+        raw image, record it as a recent file, and kick off background processing."""
+        if self._busy:
+            self.info_label.setText("Still working - please wait for the current operation to finish.")
+            return
+
+        self.file_path = file_path
         if not self._load_raw_image_from_current_path():
             return
 
+        self._add_recent_file(file_path)
         self.process_background_and_update()
+
+    # ------------------------------------------------------------------ Drag-and-drop
+
+    def dragEnterEvent(self, event):
+        urls = event.mimeData().urls() if event.mimeData().hasUrls() else []
+        if any(os.path.splitext(u.toLocalFile())[1].lower() in self.SUPPORTED_LOAD_EXTS
+               for u in urls if u.isLocalFile()):
+            event.acceptProposedAction()
+        else:
+            event.ignore()
+
+    def dropEvent(self, event):
+        paths = [u.toLocalFile() for u in event.mimeData().urls() if u.isLocalFile()]
+        valid = [p for p in paths if os.path.splitext(p)[1].lower() in self.SUPPORTED_LOAD_EXTS]
+        if not valid:
+            event.ignore()
+            return
+        event.acceptProposedAction()
+        # Only one stacked image is ever loaded at a time (same as the Load Stacked
+        # Image dialog, which is also single-select) - if several files were dropped
+        # together, take the first rather than guessing which one was intended.
+        self._load_file_path(valid[0])
+
+    # ------------------------------------------------------------------ Recent files
+
+    def _add_recent_file(self, file_path):
+        path = os.path.abspath(file_path)
+        self._recent_files = [path] + [p for p in self._recent_files if p != path]
+        self._recent_files = self._recent_files[: self.MAX_RECENT_FILES]
+        self._settings.setValue("recent_files", self._recent_files)
+        self._refresh_recent_files_menu()
+
+    def _refresh_recent_files_menu(self):
+        self.recent_files_menu.clear()
+        if not self._recent_files:
+            placeholder = self.recent_files_menu.addAction("(no recent files)")
+            placeholder.setEnabled(False)
+            return
+
+        for path in self._recent_files:
+            action = self.recent_files_menu.addAction(os.path.basename(path))
+            action.setToolTip(path)
+            action.triggered.connect(lambda _=None, p=path: self._open_recent_file(p))
+
+        self.recent_files_menu.addSeparator()
+        clear_action = self.recent_files_menu.addAction("Clear Recent Files")
+        clear_action.triggered.connect(self._clear_recent_files)
+
+    def _open_recent_file(self, path):
+        if self._busy:
+            self.info_label.setText("Still working - please wait for the current operation to finish.")
+            return
+        if not os.path.isfile(path):
+            self.info_label.setText(f"Recent file no longer exists: {path}")
+            self._recent_files = [p for p in self._recent_files if p != path]
+            self._settings.setValue("recent_files", self._recent_files)
+            self._refresh_recent_files_menu()
+            return
+        self._load_file_path(path)
+
+    def _clear_recent_files(self):
+        self._recent_files = []
+        self._settings.setValue("recent_files", [])
+        self._refresh_recent_files_menu()
 
     def on_bayer_pattern_change(self, _text=None):
         """Re-read the current FITS file when the manual debayer override changes."""
@@ -744,8 +884,7 @@ class ClariStretch(QMainWindow):
             return
 
         file_path, _ = QFileDialog.getOpenFileName(
-            self, f"Load {channel} Master", "",
-            "All Astro Formats (*.tif *.tiff *.fits *.fit *.png *.jpg)",
+            self, f"Load {channel} Master", "", self.LOAD_FILE_FILTER,
         )
         if not file_path:
             return
@@ -1047,8 +1186,20 @@ class ClariStretch(QMainWindow):
 
     # ------------------------------------------------------------------ Background extraction (threaded)
 
-    def _compute_background_removal(self, raw_image, do_extract):
-        """Pure computation, safe to run on a worker thread (touches no Qt widgets)."""
+    def _compute_background_removal(self, raw_image, do_extract, star_mask_params=None):
+        """Pure computation, safe to run on a worker thread (touches no Qt widgets).
+
+        star_mask_params, when given, enables star-aware gradient fitting: stars are
+        small, very bright, and carry no information about the smooth light-pollution
+        gradient this step models, so left in, they bias the downsampled local average
+        toward "brighter" wherever a star happens to sit - on star-dense fields that
+        shows up as a faint dark halo around stars once the (slightly too-bright)
+        background model gets subtracted back out. This excludes star pixels from
+        that local average (reusing the same top-hat star-mask logic the denoiser
+        already uses, via _compute_star_mask) via a star-confidence-weighted resize,
+        rather than an unweighted one, so each downsampled cell reads the surrounding
+        sky even where a star sits on top of it.
+        """
         if not do_extract:
             return raw_image.copy()
 
@@ -1056,15 +1207,41 @@ class ClariStretch(QMainWindow):
         h, w = img_float.shape[:2]
         ds_h, ds_w = max(16, h // 32), max(16, w // 32)
 
-        if len(img_float.shape) == 3:
-            small = cv2.resize(img_float, (ds_w, ds_h), interpolation=cv2.INTER_AREA)
-            background_small = cv2.medianBlur(small, 5)
-            background = cv2.resize(background_small, (w, h), interpolation=cv2.INTER_CUBIC)
-            subtracted = img_float - background + np.mean(background, axis=(0, 1))
+        if star_mask_params is not None:
+            # Star detection runs at full resolution (same cost as the denoiser's own
+            # mask); everything after it is just a couple of extra resize calls, so
+            # this stays cheap regardless of how large the source image is.
+            gray_for_mask = img_float.mean(axis=2) if img_float.ndim == 3 else img_float
+            star_mask_full = self._compute_star_mask(gray_for_mask, **star_mask_params)  # 1.0 = star
+            keep_weight = (1.0 - star_mask_full).astype(np.float32)  # 1.0 = sky, 0.0 = star
+
+            weight_small = cv2.resize(keep_weight, (ds_w, ds_h), interpolation=cv2.INTER_AREA)
+            weighted_source = img_float * (keep_weight[:, :, None] if img_float.ndim == 3 else keep_weight)
+            weighted_small = cv2.resize(weighted_source, (ds_w, ds_h), interpolation=cv2.INTER_AREA)
+
+            # Dividing the weighted sum by the weight recovers a local average over
+            # just the non-star pixels in each downsampled cell - a weighted-resize
+            # equivalent of "mask it out, then average what's left". A cell that's
+            # almost entirely star (weight ~0, e.g. a very bright/large star) has
+            # nothing reliable left to divide by, so it falls back to the plain
+            # (unweighted) average for that cell alone rather than dividing by ~0.
+            safe_weight = np.where(weight_small > 1e-3, weight_small, 1.0)
+            divisor = safe_weight[:, :, None] if img_float.ndim == 3 else safe_weight
+            small = weighted_small / divisor
+
+            low_weight = weight_small <= 1e-3
+            if low_weight.any():
+                plain_small = cv2.resize(img_float, (ds_w, ds_h), interpolation=cv2.INTER_AREA)
+                small[low_weight] = plain_small[low_weight]
         else:
             small = cv2.resize(img_float, (ds_w, ds_h), interpolation=cv2.INTER_AREA)
-            background_small = cv2.medianBlur(small, 5)
-            background = cv2.resize(background_small, (w, h), interpolation=cv2.INTER_CUBIC)
+
+        background_small = cv2.medianBlur(small, 5)
+        background = cv2.resize(background_small, (w, h), interpolation=cv2.INTER_CUBIC)
+
+        if len(img_float.shape) == 3:
+            subtracted = img_float - background + np.mean(background, axis=(0, 1))
+        else:
             subtracted = img_float - background + np.mean(background)
 
         subtracted = np.clip(subtracted, 0, 1)
@@ -1093,8 +1270,19 @@ class ClariStretch(QMainWindow):
             self.info_label.setText("Extracting background gradient... please wait.")
         filename = os.path.basename(self.file_path) if self.file_path else ""
 
+        # Reuse the denoiser's own star-mask sliders for the gradient fit's star
+        # exclusion too - one set of "how sensitive is star detection" controls,
+        # consistently applied, rather than a second duplicate set of sliders.
+        star_mask_params = None
+        if do_extract:
+            star_mask_params = dict(
+                min_sensitivity=self.min_star_sensitivity_slider.get(),
+                expand_iters=self.star_mask_expand_slider.get(),
+                blur_radius=self.star_mask_blur_slider.get(),
+            )
+
         self._bg_worker = BackgroundExtractionWorker(
-            self._compute_background_removal, self.raw_image, do_extract, filename
+            self._compute_background_removal, self.raw_image, do_extract, filename, star_mask_params
         )
         self._bg_worker.finished_ok.connect(self._on_background_done)
         self._bg_worker.failed.connect(self._on_background_error)
@@ -1105,6 +1293,11 @@ class ClariStretch(QMainWindow):
         suffix = " (Gradient Removed)" if did_extract else ""
         self.info_label.setText(f"Loaded: {filename}{suffix}" if filename else "Image processed.")
         self._build_preview_source()
+        # Frozen "before" snapshot for the comparison view - taken right after
+        # background extraction (if any) but before denoise/stretch/alignment, and
+        # never touched again for this load, even if the user later denoises, undoes,
+        # or re-stretches.
+        self._original_preview_source = None if self.preview_source is None else self.preview_source.copy()
 
         # Linear workflow reset: every fresh load starts over at the pre-denoise, pre-stretch
         # stage. Stretching controls lock until Apply Denoise completes (see point 5 of spec).
@@ -1654,12 +1847,67 @@ class ClariStretch(QMainWindow):
 
     # ------------------------------------------------------------------ Preview + histogram rendering
 
+    def _render_before_image(self, image):
+        """Quick percentile-based 0-1 stretch so the pre-denoise/stretch 'before'
+        image is actually visible in the comparison view (the real linear data looks
+        almost black unstretched). Purely a display rendering - this never feeds back
+        into the real linear/gradient_removed pipeline the way the arcsinh stretch does.
+        """
+        arr = image.astype(np.float32) / (65535.0 if image.dtype == np.uint16 else 255.0)
+        finite = arr[np.isfinite(arr)]
+        if finite.size == 0:
+            return np.zeros_like(arr, dtype=np.uint8)
+        lo, hi = np.percentile(finite, 0.5), np.percentile(finite, 99.5)
+        if hi <= lo:
+            lo, hi = float(finite.min()), float(finite.max())
+        if hi <= lo:
+            hi = lo + 1e-6
+        stretched = np.clip((arr - lo) / (hi - lo), 0, 1)
+        return (stretched * 255.0).astype(np.uint8)
+
+    def _compose_comparison_image(self):
+        """Pick/build the image actually drawn into the preview, per the before/after/
+        split comparison mode (point 2 of the latest feature request): flip between
+        seeing the original loaded image and the current processed result, rather than
+        only ever seeing the current state."""
+        after_img = self.processed_image
+        mode = self.compare_mode_combo.currentText() if hasattr(self, "compare_mode_combo") else "After (Processed)"
+
+        if mode == "After (Processed)" or self._original_preview_source is None:
+            return after_img
+
+        before_img = self._render_before_image(self._original_preview_source)
+
+        def to_bgr(img):
+            return img if img.ndim == 3 else cv2.cvtColor(img, cv2.COLOR_GRAY2BGR)
+
+        before_bgr, after_bgr = to_bgr(before_img), to_bgr(after_img)
+        if before_bgr.shape[:2] != after_bgr.shape[:2]:
+            before_bgr = cv2.resize(
+                before_bgr, (after_bgr.shape[1], after_bgr.shape[0]), interpolation=cv2.INTER_AREA
+            )
+
+        if mode == "Before (Original)":
+            return before_bgr
+
+        # Split View: original on the left half, processed on the right, with a thin
+        # amber divider line so the seam is easy to find even on a busy starfield.
+        h, w = after_bgr.shape[:2]
+        split_x = w // 2
+        composite = after_bgr.copy()
+        composite[:, :split_x] = before_bgr[:, :split_x]
+        composite[:, max(0, split_x - 1):split_x + 1] = (0, 215, 255)  # BGR amber
+        return composite
+
     def update_preview_display(self):
-        """Draw the processed image into the embedded live-preview QLabel."""
+        """Draw the processed (or before/split-comparison) image into the embedded
+        live-preview QLabel."""
         if self.processed_image is None:
             return
 
-        img = self.processed_image
+        img = self._compose_comparison_image()
+        if img is None:
+            return
         if img.ndim == 3:
             img_rgb = cv2.cvtColor(img, cv2.COLOR_BGR2RGB)
         else:
@@ -1700,6 +1948,142 @@ class ClariStretch(QMainWindow):
 
         self.ax.set_xlim([0, 256])
         self.canvas.draw()
+
+    # ------------------------------------------------------------------ Session / recipe persistence
+
+    def _collect_recipe_settings(self):
+        """Snapshot every tunable control into a plain JSON-serializable dict."""
+        return {
+            "luminance_strength": self.luminance_slider.get(),
+            "chrominance_strength": self.chrominance_slider.get(),
+            "min_star_sensitivity": self.min_star_sensitivity_slider.get(),
+            "star_mask_expand": self.star_mask_expand_slider.get(),
+            "star_mask_blur": self.star_mask_blur_slider.get(),
+            "lum_blend_strength": self.lum_blend_slider.get(),
+            "asinh_stretch_factor": self.asinh_slider.get(),
+            "black_point": self.black_slider.get(),
+            "r_shift_x": self.r_x_slider.get(),
+            "r_shift_y": self.r_y_slider.get(),
+            "b_shift_x": self.b_x_slider.get(),
+            "b_shift_y": self.b_y_slider.get(),
+            "cpu_cores": self.cpu_cores_slider.value(),
+            "background_extraction_enabled": self.bg_chk.isChecked(),
+            "export_16bit": self.export_16bit_chk.isChecked(),
+            "bayer_pattern": self.bayer_combo.currentText(),
+        }
+
+    def _apply_recipe_settings(self, settings):
+        """Apply a previously-saved (or hand-edited) settings dict to every control.
+
+        Unknown/missing keys are simply skipped rather than treated as an error, so a
+        recipe saved by an older version of ClariStretch (fewer sliders) still loads
+        cleanly, and a partial hand-edited file only touches the keys it names.
+        Sliders are set with blockSignals (via _set_slider_silently) so applying a
+        whole recipe doesn't re-run the processing pipeline once per slider - the
+        labels and a single pipeline refresh happen explicitly at the end instead.
+        """
+        slider_keys = {
+            "luminance_strength": self.luminance_slider,
+            "chrominance_strength": self.chrominance_slider,
+            "min_star_sensitivity": self.min_star_sensitivity_slider,
+            "star_mask_expand": self.star_mask_expand_slider,
+            "star_mask_blur": self.star_mask_blur_slider,
+            "lum_blend_strength": self.lum_blend_slider,
+            "asinh_stretch_factor": self.asinh_slider,
+            "black_point": self.black_slider,
+            "r_shift_x": self.r_x_slider,
+            "r_shift_y": self.r_y_slider,
+            "b_shift_x": self.b_x_slider,
+            "b_shift_y": self.b_y_slider,
+        }
+        for key, slider in slider_keys.items():
+            if key in settings:
+                try:
+                    self._set_slider_silently(slider, float(settings[key]))
+                except (TypeError, ValueError):
+                    pass  # a malformed value for this one key shouldn't abort the rest
+
+        if "cpu_cores" in settings:
+            try:
+                clamped = max(self.cpu_cores_slider.minimum(),
+                               min(self.cpu_cores_slider.maximum(), int(settings["cpu_cores"])))
+                self.cpu_cores_slider.blockSignals(True)
+                self.cpu_cores_slider.setValue(clamped)
+                self.cpu_cores_slider.blockSignals(False)
+            except (TypeError, ValueError):
+                pass
+
+        if "background_extraction_enabled" in settings:
+            self.bg_chk.blockSignals(True)
+            self.bg_chk.setChecked(bool(settings["background_extraction_enabled"]))
+            self.bg_chk.blockSignals(False)
+
+        if "export_16bit" in settings:
+            self.export_16bit_chk.setChecked(bool(settings["export_16bit"]))
+
+        if "bayer_pattern" in settings:
+            idx = self.bayer_combo.findText(str(settings["bayer_pattern"]))
+            if idx >= 0:
+                self.bayer_combo.blockSignals(True)
+                self.bayer_combo.setCurrentIndex(idx)
+                self.bayer_combo.blockSignals(False)
+
+        # Refresh every value label the blockSignals() calls above skipped, then
+        # re-render once with the newly-applied values instead of once per slider.
+        self.luminance_value_label.setText(f"{self.luminance_slider.get():.0f}")
+        self.chrominance_value_label.setText(f"{self.chrominance_slider.get():.0f}")
+        self.min_star_value_label.setText(f"{self.min_star_sensitivity_slider.get():.0f}")
+        self.star_mask_expand_value_label.setText(f"{self.star_mask_expand_slider.get():.0f}")
+        self.star_mask_blur_value_label.setText(f"{self.star_mask_blur_slider.get():.0f}")
+        self.lum_blend_value_label.setText(f"{self.lum_blend_slider.get():.0f}")
+        self.cpu_cores_value_label.setText(str(self.cpu_cores_slider.value()))
+        self._refresh_alignment_labels()
+        self._refresh_rgb_labels()
+
+        self._update_zoom_preview()
+        self.update_image()
+
+    def save_settings_clicked(self):
+        out_path, _ = QFileDialog.getSaveFileName(
+            self, "Save Settings (Recipe)", "", "ClariStretch Recipe (*.json)",
+        )
+        if not out_path:
+            return
+        if not os.path.splitext(out_path)[1]:
+            out_path += ".json"
+
+        try:
+            with open(out_path, "w", encoding="utf-8") as f:
+                json.dump(self._collect_recipe_settings(), f, indent=2)
+        except OSError as e:
+            self.progress_label.setText(f"Error saving settings: {e}")
+            return
+        self.progress_label.setText(f"Settings saved: {os.path.basename(out_path)}")
+
+    def load_settings_clicked(self):
+        if self._busy:
+            self.progress_label.setText("Still working - please wait for the current operation to finish.")
+            return
+
+        in_path, _ = QFileDialog.getOpenFileName(
+            self, "Load Settings (Recipe)", "", "ClariStretch Recipe (*.json)",
+        )
+        if not in_path:
+            return
+
+        try:
+            with open(in_path, "r", encoding="utf-8") as f:
+                settings = json.load(f)
+        except (OSError, json.JSONDecodeError) as e:
+            self.progress_label.setText(f"Error loading settings: {e}")
+            return
+
+        if not isinstance(settings, dict):
+            self.progress_label.setText("Settings file is not a valid recipe (expected a JSON object).")
+            return
+
+        self._apply_recipe_settings(settings)
+        self.progress_label.setText(f"Settings loaded: {os.path.basename(in_path)}")
 
     # ------------------------------------------------------------------ Export (threaded)
 

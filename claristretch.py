@@ -680,6 +680,68 @@ class ClariStretch(QMainWindow):
     # (Pure computation below - unchanged from the Tkinter version, and still safe to
     # call from a worker thread since none of it touches a widget.)
 
+    @staticmethod
+    def _extract_fits_entries(path):
+        """Open a FITS file and pull every image HDU's data out into plain numpy arrays.
+
+        Returns a list of (ndim, shape, label, array_copy, bayer_pattern_or_None) tuples -
+        _load_fits does the actual color/mono/Bayer interpretation on top of this.
+
+        Modern astropy.io.fits usage: restrict to actual image layers via
+        isinstance(ImageHDU / PrimaryHDU) rather than assuming every HDU with data is an
+        image (a BinTableHDU also has non-None .data, but it's a FITS_rec, not a plain
+        image array), and copy each array out with .data.copy() while the file is still
+        open. Every hdu.data / hdu.header access must happen inside the `with` block -
+        astropy backs HDU data with a memory map by default, and touching .data again
+        after the file closes raises "I/O operation on closed file".
+
+        Tries memmap=True first since it's the memory-efficient path for large stacks,
+        but some FITS files - notably ones with BZERO/BSCALE (scaled integer data, used
+        to store unsigned values in a signed integer type) and/or a BLANK keyword
+        (integer "no data" sentinel) - can't be memory-mapped at all; astropy raises a
+        ValueError naming exactly that ("Cannot load a memory-mapped image:
+        BZERO/BSCALE/BLANK header keywords present. Set memmap=False.") rather than
+        silently handling it. That's not a corrupt file or a bug in this app - it's a
+        real limitation of memory-mapping scaled/blanked FITS data - so on that specific
+        error this transparently retries the same file with memmap=False (reads the
+        whole file into memory instead, which is the only thing memmap=False actually
+        changes) rather than surfacing it to the user as a load failure.
+        """
+        from astropy.io import fits  # imported lazily so astropy is only required for FITS files
+
+        def _read(use_memmap):
+            collected = []
+            with fits.open(path, memmap=use_memmap) as hdul:
+                for hdu in hdul:
+                    if not isinstance(hdu, (fits.PrimaryHDU, fits.ImageHDU)):
+                        continue
+                    if hdu.data is None:
+                        continue
+                    arr = hdu.data.copy().astype(np.float64)  # detach before the file closes
+                    header = hdu.header
+                    label = str(
+                        header.get("FILTER", "") or header.get("EXTNAME", "") or getattr(hdu, "name", "") or ""
+                    ).strip().lower()
+
+                    bayer = None
+                    for key in ("BAYERPAT", "BAYERPTN", "BAYPAT"):
+                        val = header.get(key)
+                        if val:
+                            val_up = str(val).strip().upper()
+                            if val_up in ClariStretch._BAYER_CV_CODE:
+                                bayer = val_up
+                                break
+
+                    collected.append((arr.ndim, arr.shape, label, arr, bayer))
+            return collected
+
+        try:
+            return _read(use_memmap=True)
+        except ValueError as e:
+            if "memory-mapped" in str(e).lower() or "BZERO" in str(e) or "BSCALE" in str(e):
+                return _read(use_memmap=False)
+            raise
+
     def _load_fits(self, path, forced_pattern="Auto-detect"):
         """Load a FITS file into a normalized uint16 array (BGR order for color data).
 
@@ -707,39 +769,7 @@ class ClariStretch(QMainWindow):
         color signal - stretching each channel independently there would flatten real
         color balance rather than reveal it.
         """
-        from astropy.io import fits  # imported lazily so astropy is only required for FITS files
-
-        # Modern astropy.io.fits usage: open with memmap=True explicitly (memory-efficient
-        # for large stacks), restrict to actual image layers via isinstance(ImageHDU /
-        # PrimaryHDU) rather than assuming every HDU with data is an image (a BinTableHDU
-        # also has non-None .data, but it's a FITS_rec, not a plain image array), and copy
-        # each array out with .data.copy() while the file is still open. Every hdu.data /
-        # hdu.header access must happen inside this `with` block - astropy backs HDU data
-        # with a memory map by default, and touching .data again after the file closes
-        # raises "I/O operation on closed file".
-        entries = []  # list of (ndim, shape, label, numpy_array_copy, bayer_pattern_or_None)
-        with fits.open(path, memmap=True) as hdul:
-            for hdu in hdul:
-                if not isinstance(hdu, (fits.PrimaryHDU, fits.ImageHDU)):
-                    continue
-                if hdu.data is None:
-                    continue
-                arr = hdu.data.copy().astype(np.float64)  # detach from the memmap before the file closes
-                header = hdu.header
-                label = str(
-                    header.get("FILTER", "") or header.get("EXTNAME", "") or getattr(hdu, "name", "") or ""
-                ).strip().lower()
-
-                bayer = None
-                for key in ("BAYERPAT", "BAYERPTN", "BAYPAT"):
-                    val = header.get(key)
-                    if val:
-                        val_up = str(val).strip().upper()
-                        if val_up in self._BAYER_CV_CODE:
-                            bayer = val_up
-                            break
-
-                entries.append((arr.ndim, arr.shape, label, arr, bayer))
+        entries = self._extract_fits_entries(path)  # list of (ndim, shape, label, array_copy, bayer_or_None)
 
         if not entries:
             raise ValueError("No image data found in FITS file.")

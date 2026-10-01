@@ -38,14 +38,11 @@ jobs:
         path: dist/claristretch.exe
         retention-days: 30
         # 2. ADD THE RELEASE STEP AT THE VERY END
-    
-     
-    permissions:
+    # Fix for 403 "Resource not accessible by integration":
+# the default GITHUB_TOKEN is read-only, so it needs write access to create releases.
+permissions:
   contents: write
-    - name: Create Release and Upload Executable
-      uses: softprops/action-gh-release@v2
-      with:
-        tag_name: v1.0.${{ github.run_number }}
+  
         name: Release v1.0.${{ github.run_number }}
         files: claristretch-windows-executable.zip
       env:

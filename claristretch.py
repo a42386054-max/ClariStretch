@@ -303,6 +303,13 @@ class ClariStretch(QMainWindow):
         self.preview_scale = 1.0      # preview_source size / full-resolution size
         self.file_path = None
 
+        # LRGB combination workflow: separately-loaded L/R/G/B masters, each stored as a
+        # float [0,1] mono array (already percentile-normalized, see load_lrgb_channel),
+        # independent of self.raw_image until Combine LRGB is clicked. Keeping these
+        # loaded (rather than clearing them after a combine) lets the luminance blend
+        # strength be retuned and recombined without re-picking files.
+        self._lrgb_sources = {"L": None, "R": None, "G": None, "B": None}
+
         # Linear denoising workflow state. linear_image is the float32 [0,1] array the
         # denoise engine reads and writes; it stays perfectly linear (no STF/arcsinh
         # stretch applied) and is pushed back into gradient_removed after each change
@@ -344,6 +351,47 @@ class ClariStretch(QMainWindow):
         self.info_label = QLabel("No image loaded")
         self.info_label.setWordWrap(True)
         control_layout.addWidget(self.info_label)
+
+        # --- Section 0b: LRGB Combination (optional alternative to Load Stacked Image) ---
+        lrgb_group = QGroupBox("LRGB Combination (Optional)")
+        lrgb_layout = QVBoxLayout(lrgb_group)
+        lrgb_help = QLabel(
+            "Load separate L/R/G/B master files and combine them into one color image: "
+            "R, G and B provide the color, and a loaded L master replaces just the "
+            "luminance/detail channel (the standard LRGB technique) rather than being "
+            "layered on top in pixel space. L is optional - R, G and B alone combine "
+            "into a plain RGB color image."
+        )
+        lrgb_help.setWordWrap(True)
+        lrgb_help.setStyleSheet("color: #666666;")
+        lrgb_layout.addWidget(lrgb_help)
+
+        self._lrgb_channel_labels = {}
+        for channel in ("L", "R", "G", "B"):
+            row = QHBoxLayout()
+            btn = QPushButton(f"Load {channel}" + (" (optional)" if channel == "L" else ""))
+            btn.clicked.connect(lambda _=None, c=channel: self.load_lrgb_channel(c))
+            status = QLabel("Not loaded")
+            status.setStyleSheet("color: #888888;")
+            status.setWordWrap(True)
+            row.addWidget(btn)
+            row.addWidget(status, stretch=1)
+            lrgb_layout.addLayout(row)
+            self._lrgb_channel_labels[channel] = status
+
+        self.lum_blend_slider = ScaledSlider(0, 100, divisor=1, default=100)
+        self.lum_blend_value_label = QLabel(str(self.lum_blend_slider.get()))
+        lrgb_layout.addLayout(self._labeled_row("Luminance Blend Strength:", self.lum_blend_value_label))
+        lrgb_layout.addWidget(self.lum_blend_slider)
+        self.lum_blend_slider.valueChanged.connect(
+            lambda _=None: self.lum_blend_value_label.setText(f"{self.lum_blend_slider.get():.0f}"))
+
+        self.combine_lrgb_btn = QPushButton("Combine LRGB")
+        self.combine_lrgb_btn.setEnabled(False)  # needs R, G and B loaded first
+        self.combine_lrgb_btn.clicked.connect(self.combine_lrgb_clicked)
+        lrgb_layout.addWidget(self.combine_lrgb_btn)
+
+        control_layout.addWidget(lrgb_group)
 
         # --- Section 1: Gradient Removal (Light Pollution) ---
         gradient_group = QGroupBox("Gradient Removal (Light Pollution)")
@@ -675,6 +723,144 @@ class ClariStretch(QMainWindow):
 
         self.info_label.setText(f"Loaded: {filename}")
         return True
+
+    # ------------------------------------------------------------------ LRGB combination
+    # (Alternative way to populate self.raw_image: instead of one pre-stacked color file,
+    # combine separately-loaded single-filter masters. Once combined, the result feeds
+    # into process_background_and_update() exactly like a normal Load Stacked Image, so
+    # denoising, stretching, alignment and export all work on it unchanged.)
+
+    def load_lrgb_channel(self, channel):
+        """Load a single L/R/G/B master file for the LRGB combination workflow.
+
+        Each master is stored independently as a float [0,1] mono array (robust
+        percentile-normalized, the same treatment _load_fits already gives a mono FITS
+        frame) rather than being combined immediately - this lets masters be loaded in
+        any order, replaced individually, and recombined with a different luminance
+        blend strength without re-picking files.
+        """
+        if self._busy:
+            self.info_label.setText("Still working - please wait for the current operation to finish.")
+            return
+
+        file_path, _ = QFileDialog.getOpenFileName(
+            self, f"Load {channel} Master", "",
+            "All Astro Formats (*.tif *.tiff *.fits *.fit *.png *.jpg)",
+        )
+        if not file_path:
+            return
+
+        ext = os.path.splitext(file_path)[1].lower()
+        try:
+            if ext in (".fits", ".fit"):
+                entries = self._extract_fits_entries(file_path)
+                mono_entries = [e for e in entries if e[0] == 2]
+                if not mono_entries:
+                    raise ValueError("No 2-D image data found in FITS file.")
+                # An LRGB master is expected to be a single mono frame; if the file
+                # somehow has several 2-D layers, just use the first rather than
+                # guessing which one is the intended master.
+                data = mono_entries[0][3]
+                array = self._normalize_channel(data)
+            else:
+                raw = cv2.imread(file_path, cv2.IMREAD_UNCHANGED)
+                if raw is None:
+                    raise ValueError("Error loading file.")
+                if raw.ndim == 3:
+                    # A color file used as an L/R/G/B master is unusual but not invalid -
+                    # collapse it to one channel via standard luma weighting rather than
+                    # silently picking a single color channel.
+                    raw = cv2.cvtColor(raw, cv2.COLOR_BGR2GRAY)
+                array = self._normalize_channel(raw.astype(np.float64))
+        except Exception as e:
+            self._lrgb_channel_labels[channel].setText(f"Error: {e}")
+            self._lrgb_channel_labels[channel].setStyleSheet("color: #cc3333;")
+            return
+
+        self._lrgb_sources[channel] = array
+        h, w = array.shape
+        self._lrgb_channel_labels[channel].setText(f"{os.path.basename(file_path)} ({w}x{h})")
+        self._lrgb_channel_labels[channel].setStyleSheet("color: #2a8a2a;")
+
+        have_rgb = all(self._lrgb_sources[c] is not None for c in ("R", "G", "B"))
+        self.combine_lrgb_btn.setEnabled(have_rgb)
+
+    def combine_lrgb_clicked(self):
+        """Combine the loaded R/G/B masters into a color image, optionally blending in
+        the loaded L master as the luminance/detail channel, then feed the result into
+        the normal load pipeline (background extraction, linear workflow lock, etc.)."""
+        if self._busy:
+            self.info_label.setText("Still working - please wait for the current operation to finish.")
+            return
+
+        r, g, b = self._lrgb_sources["R"], self._lrgb_sources["G"], self._lrgb_sources["B"]
+        if r is None or g is None or b is None:
+            self.info_label.setText("Load R, G and B masters before combining (L is optional).")
+            return
+
+        l = self._lrgb_sources["L"]
+        lum_blend_strength = self.lum_blend_slider.get() / 100.0
+
+        try:
+            combined = self._compute_lrgb_combine(r, g, b, l, lum_blend_strength)
+        except Exception as e:
+            self.info_label.setText(f"LRGB combine failed: {e}")
+            return
+
+        self.raw_image = combined
+        # No single source file represents a combined image, but process_background_and_
+        # update()'s own "Loaded: ..." message (set once the background worker finishes)
+        # derives its filename from self.file_path - a descriptive pseudo-path here means
+        # that message reads "Loaded: LRGB Combination (L+R+G+B)" instead of being
+        # overwritten with a vague "Image processed." the moment that worker completes.
+        used = "+".join(c for c in ("L", "R", "G", "B") if self._lrgb_sources[c] is not None)
+        self.file_path = f"LRGB Combination ({used})"
+
+        self.process_background_and_update()
+
+    def _compute_lrgb_combine(self, r, g, b, l, lum_blend_strength):
+        """Combine normalized [0,1] mono R/G/B channels into a BGR color image.
+
+        LRGB masters routinely differ in resolution (a full-resolution L master shot
+        against 2x2-binned RGB is common), so every channel is resized to a common
+        target resolution first: the L master's own resolution if one was loaded
+        (conventionally the reference frame in an LRGB set), otherwise the largest of
+        R/G/B.
+
+        If an L master was loaded, it's blended into the combined image's luminance via
+        LAB color space - L carries structural detail (usually the sharpest,
+        highest-SNR data in an LRGB set) while R/G/B contribute color (chrominance).
+        This is the standard LRGB combination technique: L is substituted for the
+        luminance channel, not layered on top of the RGB image in plain pixel space.
+
+        lum_blend_strength (0.0-1.0) controls how much of the result's luminance comes
+        from the loaded L master vs. the luminance the R/G/B combine already implies -
+        1.0 fully replaces it, 0.0 leaves the RGB-derived luminance untouched.
+        """
+        if l is not None:
+            target_h, target_w = l.shape
+        else:
+            target_h, target_w = max((c.shape for c in (r, g, b)), key=lambda s: s[0] * s[1])
+
+        def to_target(channel):
+            if channel.shape == (target_h, target_w):
+                return channel.astype(np.float32)
+            is_upscale = channel.shape[0] * channel.shape[1] < target_h * target_w
+            interp = cv2.INTER_CUBIC if is_upscale else cv2.INTER_AREA
+            return cv2.resize(channel.astype(np.float32), (target_w, target_h), interpolation=interp)
+
+        r_rs, g_rs, b_rs = to_target(r), to_target(g), to_target(b)
+        bgr = np.clip(np.stack([b_rs, g_rs, r_rs], axis=-1), 0.0, 1.0).astype(np.float32)
+
+        if l is not None and lum_blend_strength > 0:
+            l_rs = np.clip(to_target(l), 0.0, 1.0)
+            lab = cv2.cvtColor(bgr, cv2.COLOR_BGR2LAB)
+            rgb_luminance = lab[:, :, 0] / 100.0  # [0,1], the luminance R/G/B alone implies
+            blended = (1.0 - lum_blend_strength) * rgb_luminance + lum_blend_strength * l_rs
+            lab[:, :, 0] = np.clip(blended, 0.0, 1.0) * 100.0
+            bgr = cv2.cvtColor(lab.astype(np.float32), cv2.COLOR_LAB2BGR)
+
+        return (np.clip(bgr, 0.0, 1.0) * 65535.0).astype(np.uint16)
 
     # ------------------------------------------------------------------ FITS handling
     # (Pure computation below - unchanged from the Tkinter version, and still safe to

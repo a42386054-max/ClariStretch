@@ -1,4 +1,5 @@
 # ClariStretch
+<<<<<<< HEAD
 
 ClariStretch is a desktop astrophotography image processor built with PyQt6. It
 handles the full linear-to-stretched workflow for stacked subs: loading (including
@@ -175,3 +176,6 @@ which hook triggers it.
 
 This is an actively developed internal tool; interfaces and defaults (denoise
 sigma scaling, star-mask thresholds, preview crop size, etc.) may still change.
+=======
+A PyQt6 astrophotography image processor — FITS/OSC ingestion, wavelet denoising with star protection, arcsinh stretch, and RGB alignment.
+>>>>>>> 4e3e95392ae908c7193bc6830411efde803b63c1

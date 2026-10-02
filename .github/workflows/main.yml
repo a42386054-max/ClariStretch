@@ -31,7 +31,7 @@ jobs:
 
     - name: Build EXE with PyInstaller
       run: |
-        pyinstaller --onefile claristretch.py
+       pyinstaller --onefile --noconsole --icon="assets/icon.ico" --add-data "assets;assets" claristretch.py
 
     # This step triggers on every push, creating a unique release version
     - name: Create GitHub Release

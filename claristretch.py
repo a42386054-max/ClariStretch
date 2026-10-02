@@ -11,6 +11,7 @@ import sys
 import os
 import gc
 import json
+import re
 import multiprocessing
 import warnings
 
@@ -300,6 +301,19 @@ class ClariStretch(QMainWindow):
     # enough to cover a typical multi-target imaging session.
     MAX_RECENT_FILES = 10
 
+    # Common FITS FILTER/EXTNAME header spellings for each LRGB channel, used to spot
+    # a single-filter sub/stack loaded via "Load Stacked Image" (e.g. a Luminance-only
+    # frame) so a hint can point toward LRGB Combination instead - narrowband filters
+    # (Ha/OIII/SII etc.) deliberately aren't in here, since those aren't part of the
+    # LRGB workflow and a mono narrowband frame is a normal, intentional thing to load
+    # and process on its own.
+    LRGB_FILTER_ALIASES = {
+        "l": "L", "lum": "L", "luminance": "L", "clear": "L", "clr": "L", "pan": "L",
+        "r": "R", "red": "R",
+        "g": "G", "green": "G",
+        "b": "B", "blue": "B",
+    }
+
     def __init__(self):
         super().__init__()
         self.setWindowTitle("ClariStretch")
@@ -335,6 +349,13 @@ class ClariStretch(QMainWindow):
         # loaded (rather than clearing them after a combine) lets the luminance blend
         # strength be retuned and recombined without re-picking files.
         self._lrgb_sources = {"L": None, "R": None, "G": None, "B": None}
+
+        # Set by _load_fits when "Load Stacked Image" loads a genuinely mono FITS
+        # frame whose FILTER/EXTNAME header names a single LRGB channel (e.g. a
+        # Luminance-only sub) - _on_background_done turns this into an on-screen hint
+        # pointing toward LRGB Combination. Reset on every load so a stale hint from
+        # an earlier file never survives into the next, unrelated one.
+        self._last_single_filter_channel = None
 
         # Linear denoising workflow state. linear_image is the float32 [0,1] array the
         # denoise engine reads and writes; it stays perfectly linear (no STF/arcsinh
@@ -840,6 +861,7 @@ class ClariStretch(QMainWindow):
         """Load self.file_path into self.raw_image. Returns True on success."""
         filename = os.path.basename(self.file_path)
         ext = os.path.splitext(self.file_path)[1].lower()
+        self._last_single_filter_channel = None  # reset each load; _load_fits sets it when relevant
 
         if ext in (".fits", ".fit"):
             # cv2.imread has no FITS codec - it will always return None for these,
@@ -947,6 +969,7 @@ class ClariStretch(QMainWindow):
             return
 
         self.raw_image = combined
+        self._last_single_filter_channel = None  # the result is a combined color image, never a hint candidate
         # No single source file represents a combined image, but process_background_and_
         # update()'s own "Loaded: ..." message (set once the background worker finishes)
         # derives its filename from self.file_path - a descriptive pseudo-path here means
@@ -1145,7 +1168,7 @@ class ClariStretch(QMainWindow):
             return (np.stack(normalized, axis=-1) * 65535.0).astype(np.uint16)
 
         if two_d:
-            _, _, _, data, header_bayer = two_d[0]
+            _, _, label, data, header_bayer = two_d[0]
 
             forced = str(forced_pattern or "").strip().upper()
             if forced in self._BAYER_CV_CODE:
@@ -1157,6 +1180,13 @@ class ClariStretch(QMainWindow):
 
             if effective_bayer:
                 return self._debayer(data, effective_bayer)
+
+            # A genuinely mono frame (no Bayer pattern applied) whose FILTER/EXTNAME
+            # header names a single LRGB channel is very likely one sub/stack out of
+            # an LRGB set (e.g. a Luminance-only frame), not a finished color image -
+            # _load_raw_image_from_current_path surfaces this as a hint once loading
+            # completes, pointing toward LRGB Combination instead.
+            self._last_single_filter_channel = self._detect_lrgb_filter_label(label)
             return (self._normalize_channel(data) * 65535.0).astype(np.uint16)
 
         raise ValueError("Unsupported FITS data layout.")
@@ -1183,6 +1213,20 @@ class ClariStretch(QMainWindow):
             hi = lo + 1.0
 
         return np.clip((data - lo) / (hi - lo), 0, 1)
+
+    @classmethod
+    def _detect_lrgb_filter_label(cls, label):
+        """Match a FITS FILTER/EXTNAME header value against the common L/R/G/B
+        aliases (e.g. "L", "Luminance", "Red") used to tag a single-filter
+        calibrated sub/stack. Returns the matching LRGB channel letter, or None if
+        the label doesn't look like one of those four - so a narrowband label
+        (e.g. "Ha") or anything unrecognized never triggers the hint."""
+        if not label:
+            return None
+        match = re.match(r"[a-zA-Z]+", label.strip())
+        if not match:
+            return None
+        return cls.LRGB_FILTER_ALIASES.get(match.group(0).lower())
 
     # ------------------------------------------------------------------ Background extraction (threaded)
 
@@ -1237,6 +1281,23 @@ class ClariStretch(QMainWindow):
             small = cv2.resize(img_float, (ds_w, ds_h), interpolation=cv2.INTER_AREA)
 
         background_small = cv2.medianBlur(small, 5)
+
+        # A real light-pollution gradient varies slowly across the whole frame, so the
+        # background model should too - but median blur is edge-preserving, not
+        # smoothing: on this very coarse grid (one cell per ~32px) it can leave sharp
+        # plateau-to-plateau steps between cells wherever the downsampled image has a
+        # real hard edge in it, most commonly a saturated/clipped bright core (a
+        # star's center, or an overexposed galaxy/nebula core) sitting next to
+        # unsaturated surroundings. cv2.resize's cubic interpolation doesn't smooth
+        # those steps away - cubic splines can overshoot right at a hard edge - so
+        # they survive the upsample to full resolution as visible rectangular blocks
+        # once this background is subtracted back out of the image. A small Gaussian
+        # blur here, while the array is still tiny (tens of pixels across, so this
+        # stays cheap regardless of the source image's real resolution), erases those
+        # steps before the expensive part - the cubic upsample - ever sees them.
+        small_blur_sigma = max(1.0, min(ds_h, ds_w) * 0.08)
+        background_small = cv2.GaussianBlur(background_small, (0, 0), small_blur_sigma)
+
         background = cv2.resize(background_small, (w, h), interpolation=cv2.INTER_CUBIC)
 
         if len(img_float.shape) == 3:
@@ -1291,7 +1352,21 @@ class ClariStretch(QMainWindow):
     def _on_background_done(self, gradient_removed, did_extract, filename):
         self.gradient_removed = gradient_removed
         suffix = " (Gradient Removed)" if did_extract else ""
-        self.info_label.setText(f"Loaded: {filename}{suffix}" if filename else "Image processed.")
+        base_msg = f"Loaded: {filename}{suffix}" if filename else "Image processed."
+
+        # Single-filter LRGB sub hint (point: "do this please" - flagging a mono L/R/G/B
+        # frame loaded via Load Stacked Image instead of LRGB Combination) - appended
+        # here, after background extraction, since this is the last thing that sets
+        # info_label for a normal load and so the one message guaranteed not to get
+        # overwritten a moment later.
+        hint = ""
+        if self._last_single_filter_channel:
+            hint = (
+                f"  This looks like a single {self._last_single_filter_channel}-filter "
+                f"sub, not a combined color image - use LRGB Combination (below) to "
+                f"combine it with the other channels instead."
+            )
+        self.info_label.setText(base_msg + hint)
         self._build_preview_source()
         # Frozen "before" snapshot for the comparison view - taken right after
         # background extraction (if any) but before denoise/stretch/alignment, and

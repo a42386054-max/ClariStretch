@@ -15,10 +15,10 @@ jobs:
 
     steps:
     - name: Checkout repository
-      uses: actions/checkout@v7
+      uses: actions/checkout@v7 # Upgraded to the latest version
 
     - name: Set up Python
-      uses: actions/setup-python@v7
+      uses: actions/setup-python@v5
       with:
         python-version: '3.11'
         cache: 'pip'
@@ -26,12 +26,35 @@ jobs:
     - name: Install dependencies
       run: |
         python -m pip install --upgrade pip
-        pip install pyinstaller
+        pip install "Nuitka[onefile]"
         if (Test-Path requirements.txt) { pip install -r requirements.txt }
 
-    - name: Build EXE with PyInstaller
-      run: |
-       pyinstaller --onefile --noconsole --icon="assets/icon.ico" --add-data "assets;assets" claristretch.py
+    # --- START OF CACHE STEP ---
+    - name: Cache Nuitka Build Dependencies & Ccache
+      uses: actions/cache@v4
+      with:
+        path: ~\AppData\Local\Nuitka\Nuitka
+        key: ${{ runner.os }}-nuitka-${{ hashFiles('**/requirements.txt') }}-${{ github.sha }}
+        restore-keys: |
+          ${{ runner.os }}-nuitka-${{ hashFiles('**/requirements.txt') }}-
+          ${{ runner.os }}-nuitka-
+    # --- END OF CACHE STEP ---
+
+    # REPLACED PYINSTALLER STEP WITH NUITKA ACTION
+    - name: Build EXE with Nuitka
+      uses: Nuitka/Nuitka-Action@main
+      with:
+        nuitka-version: main
+        script-name: claristretch.py
+        mode: onefile
+        args: |
+          --standalone
+          --assume-yes-for-downloads
+          --enable-plugin=pyqt6
+          --windows-icon-from-ico=assets/icon.ico
+          --include-data-dir=assets=assets
+          --windows-console-mode=disable
+          --include-windows-runtime-dlls=yes
 
     # This step triggers on every push, creating a unique release version
     - name: Create GitHub Release
@@ -45,4 +68,4 @@ jobs:
           Commit: ${{ github.sha }}
         draft: false
         prerelease: false
-        files: dist/*.exe
+        files: build/*.exe # Directs the release handler to Nuitka's build output folder

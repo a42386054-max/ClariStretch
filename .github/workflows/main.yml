@@ -28,6 +28,8 @@ jobs:
         python -m pip install --upgrade pip
         pip install "Nuitka[onefile]"
         if (Test-Path requirements.txt) { pip install -r requirements.txt }
+        # FIX: Downgrade lazy-loader to bypass the upstream Nuitka compiler crash
+        pip install "lazy-loader<=0.4"
 
     # --- START OF CACHE STEP ---
     - name: Cache Nuitka Build Dependencies & Ccache

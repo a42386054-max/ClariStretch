@@ -15,7 +15,7 @@ jobs:
 
     steps:
     - name: Checkout repository
-      uses: actions/checkout@v7 # Upgraded to the latest version
+      uses: actions/checkout@v7
 
     - name: Set up Python
       uses: actions/setup-python@v5
@@ -40,21 +40,18 @@ jobs:
           ${{ runner.os }}-nuitka-
     # --- END OF CACHE STEP ---
 
-    # REPLACED PYINSTALLER STEP WITH NUITKA ACTION
+    # CORRECTED NUITKA ACTION WITH VALID EXPLICIT INPUTS
     - name: Build EXE with Nuitka
       uses: Nuitka/Nuitka-Action@main
       with:
         nuitka-version: main
         script-name: claristretch.py
         mode: onefile
-        args: |
-          --standalone
-          --assume-yes-for-downloads
-          --enable-plugin=pyqt6
-          --windows-icon-from-ico=assets/icon.ico
-          --include-data-dir=assets=assets
-          --windows-console-mode=disable
-          --include-windows-runtime-dlls=yes
+        assume-yes-for-downloads: true
+        enable-plugins: pyqt6
+        windows-console-mode: disable
+        windows-icon-from-ico: assets/icon.ico
+        include-data-dir: assets=assets
 
     # This step triggers on every push, creating a unique release version
     - name: Create GitHub Release
@@ -68,4 +65,4 @@ jobs:
           Commit: ${{ github.sha }}
         draft: false
         prerelease: false
-        files: build/*.exe # Directs the release handler to Nuitka's build output folder
+        files: build/*.exe

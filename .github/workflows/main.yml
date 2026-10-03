@@ -1,4 +1,4 @@
-ame: Build and Release Windows Executable on Push
+name: Build and Release Windows Executable on Push
 
 on:
   push:

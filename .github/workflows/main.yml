@@ -70,4 +70,6 @@ jobs:
           Commit: ${{ github.sha }}
         draft: false
         prerelease: false
-        files: build/*.exe
+       files: |
+            dist/SkyWarden.exe
+            SkyWarden-windows.zip

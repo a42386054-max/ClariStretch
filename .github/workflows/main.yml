@@ -1,10 +1,13 @@
-push:
+name: Build and Release Windows Executable on Push
+
+on:
+  push:
     branches:
       - main # Triggers automatically every time new code is pushed to main
   workflow_dispatch: # Allows manual trigger if needed
 
 permissions:
-  contents: write # Crucial: Allows GitHub Actions to create the release and upload the .exe
+  contents: write # Required so the workflow can create the release and upload the .exe
 
 jobs:
   build:
@@ -12,7 +15,7 @@ jobs:
 
     steps:
     - name: Checkout repository
-      uses: actions/checkout@v7
+      uses: actions/checkout@v4
 
     - name: Set up Python
       uses: actions/setup-python@v5
@@ -23,48 +26,56 @@ jobs:
     - name: Install dependencies
       run: |
         python -m pip install --upgrade pip
-        pip install "Nuitka[onefile]"
+        pip install pyinstaller
         if (Test-Path requirements.txt) { pip install -r requirements.txt }
-        # FIX: Downgrade lazy-loader to bypass the upstream Nuitka compiler crash
-        pip install "lazy-loader<=0.4"
 
-    # --- START OF CACHE STEP ---
-    - name: Cache Nuitka Build Dependencies & Ccache
-      uses: actions/cache@v4
-      with:
-        path: ~\AppData\Local\Nuitka\Nuitka
-        key: ${{ runner.os }}-nuitka-${{ hashFiles('**/requirements.txt') }}-${{ github.sha }}
-        restore-keys: |
-          ${{ runner.os }}-nuitka-${{ hashFiles('**/requirements.txt') }}-
-          ${{ runner.os }}-nuitka-
-    # --- END OF CACHE STEP ---
+    - name: Build EXE with PyInstaller
+      # Mirrors the build command documented in README.md, so a GitHub Actions build
+      # and a local build never drift apart:
+      #   --windowed     no console window behind the GUI
+      #   --icon         stamps assets/icon.ico onto the .exe file itself
+      #   --add-data     bundles assets/icon.png so the running window has its icon
+      #   --exclude-module  drops astropy.samp / pyvo, which ClariStretch never uses
+      #   --noupx        never compress the binary with UPX; UPX-packed executables
+      #                  are flagged by antivirus engines far more often
+      run: |
+        pyinstaller --onefile --windowed --noupx --name ClariStretch `
+          --icon assets/icon.ico `
+          --add-data "assets/icon.png;assets" `
+          --exclude-module astropy.samp --exclude-module pyvo `
+          claristretch.py
 
-    # CORRECTED NUITKA ACTION WITH ASTROPY PACKAGING
-    - name: Build EXE with Nuitka
-      uses: Nuitka/Nuitka-Action@main
-      with:
-        nuitka-version: main
-        script-name: claristretch.py
-        mode: standalone
-        msvc: 'latest'
-        assume-yes-for-downloads: true
-        enable-plugins: pyqt6
-        windows-console-mode: disable
-        windows-icon-from-ico: assets/icon.ico
-        include-data-dir: assets=assets
-        include-package: astropy           # Explicitly forces astropy to be bundled
-        include-package-data: astropy      # Force bundles astropy's internal data tables
+    - name: Name the exe with the GitHub Actions build number
+      # github.run_number counts up by one on every workflow run, so each download
+      # carries the same number as its release (build-N) and different builds can't
+      # be confused with each other.
+      run: |
+        Rename-Item dist/ClariStretch.exe "ClariStretch-build-${{ github.run_number }}.exe"
+
+    - name: Compute SHA-256 checksum
+      # Published in the release notes so anyone can confirm the file they downloaded
+      # is exactly what this workflow built. Also handy for Microsoft false-positive
+      # submissions, which ask for the file hash.
+      id: hash
+      run: |
+        $hash = (Get-FileHash "dist/ClariStretch-build-${{ github.run_number }}.exe" -Algorithm SHA256).Hash
+        "sha256=$hash" >> $env:GITHUB_OUTPUT
 
     # This step triggers on every push, creating a unique release version
     - name: Create GitHub Release
       id: create_release
-      uses: softprops/action-gh-release@v3
+      uses: softprops/action-gh-release@v2
       with:
         tag_name: build-${{ github.run_number }}
         name: Build Version ${{ github.run_number }}
         body: |
           Automated compilation from latest push.
           Commit: ${{ github.sha }}
+          SHA-256: `${{ steps.hash.outputs.sha256 }}`
+
+          Built on GitHub's own servers from the source in this repo. The exe is
+          unsigned, so Windows SmartScreen or Defender may warn about it; see the
+          README section on code signing and SmartScreen.
         draft: false
         prerelease: false
-        files: build/*.exe
+        files: dist/ClariStretch-build-${{ github.run_number }}.exe

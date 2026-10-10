@@ -1,7 +1,4 @@
-name: Build and Release Windows Executable on Push
-
-on:
-  push:
+push:
     branches:
       - main # Triggers automatically every time new code is pushed to main
   workflow_dispatch: # Allows manual trigger if needed
@@ -64,12 +61,10 @@ jobs:
       uses: softprops/action-gh-release@v3
       with:
         tag_name: build-${{ github.run_number }}
-        name: Build Version ${{ github.run_number@v3 }}
+        name: Build Version ${{ github.run_number }}
         body: |
           Automated compilation from latest push.
           Commit: ${{ github.sha }}
         draft: false
         prerelease: false
-       files: |
-            dist/SkyWarden.exe
-            SkyWarden-windows.zip
+        files: build/*.exe
